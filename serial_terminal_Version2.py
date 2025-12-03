@@ -155,6 +155,14 @@ class SerialTerminal(tk.Tk):
         send_btn = ttk.Button(bottom_frame, text="Send", command=self.send_data, width=12)
         send_btn.grid(row=0, column=4)
 
+        # NEW BUTTON: Full (pale green) at bottom-right to send predefined full key
+        # Use a regular tk.Button to allow background color on most platforms
+        self.full_btn = tk.Button(bottom_frame, text="Full", bg="#dff7df", activebackground="#c9f0c7",
+                                   command=self.send_full_key, width=8)
+        # ensure column exists and place to the right
+        bottom_frame.columnconfigure(5, weight=0)
+        self.full_btn.grid(row=0, column=5, sticky="e", padx=(8,0))
+
         # Status bar
         self.status_var = tk.StringVar(value="Closed")
         status = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w")
@@ -350,6 +358,19 @@ class SerialTerminal(tk.Tk):
             self._display_sent(ts, data)
         except Exception as e:
             messagebox.showerror("Send", f"Failed to send SELF key:\n{e}")
+
+    def send_full_key(self):
+        """Send the fixed hex sequence FA70464300E1F0AA55 over serial."""
+        if not self.serial_port or not self.serial_port.is_open:
+            messagebox.showwarning("Send", "Serial port is not open.")
+            return
+        try:
+            data = bytes.fromhex("FA70464300E1F0AA55")
+            self.serial_port.write(data)
+            ts = time.time()
+            self._display_sent(ts, data)
+        except Exception as e:
+            messagebox.showerror("Send", f"Failed to send FULL key:\n{e}")
 
     def _display_sent(self, ts, data: bytes):
         if self.show_hex.get():
