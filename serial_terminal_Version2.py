@@ -131,6 +131,9 @@ class SerialTerminal(tk.Tk):
         ttk.Button(right_frame, text="Clear", command=self.clear_display).pack(fill="x", pady=(0,4))
         ttk.Button(right_frame, text="Save Log", command=self.save_log).pack(fill="x", pady=(0,8))
 
+        # NEW BUTTON: send predefined "self" key as hex when pressed
+        ttk.Button(right_frame, text="self", command=self.send_self_key).pack(fill="x", pady=(0,8))
+
         ttk.Checkbutton(right_frame, text="Show HEX", variable=self.show_hex).pack(anchor="w")
         ttk.Checkbutton(right_frame, text="Timestamps", variable=self.show_timestamp).pack(anchor="w")
 
@@ -334,6 +337,19 @@ class SerialTerminal(tk.Tk):
             self._display_sent(ts, data)
         except Exception as e:
             messagebox.showerror("Send", f"Failed to send data:\n{e}")
+
+    def send_self_key(self):
+        """Send the fixed hex sequence FA70544300E1F0AA55 over serial."""
+        if not self.serial_port or not self.serial_port.is_open:
+            messagebox.showwarning("Send", "Serial port is not open.")
+            return
+        try:
+            data = bytes.fromhex("FA70544300E1F0AA55")
+            self.serial_port.write(data)
+            ts = time.time()
+            self._display_sent(ts, data)
+        except Exception as e:
+            messagebox.showerror("Send", f"Failed to send SELF key:\n{e}")
 
     def _display_sent(self, ts, data: bytes):
         if self.show_hex.get():
