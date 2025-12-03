@@ -131,8 +131,20 @@ class SerialTerminal(tk.Tk):
         ttk.Button(right_frame, text="Clear", command=self.clear_display).pack(fill="x", pady=(0,4))
         ttk.Button(right_frame, text="Save Log", command=self.save_log).pack(fill="x", pady=(0,8))
 
-        # NEW BUTTON: send predefined "self" key as hex when pressed
-        ttk.Button(right_frame, text="self", command=self.send_self_key).pack(fill="x", pady=(0,8))
+        # Move Full up here and use a stronger green
+        self.full_btn = tk.Button(right_frame, text="Full", bg="#57b857", fg="white",
+                                  activebackground="#47a047", command=self.send_full_key)
+        self.full_btn.pack(fill="x", pady=(0,6))
+
+        # Fi button (red) - sends the Fi packet
+        self.fi_btn = tk.Button(right_frame, text="Fi", bg="#d9534f", fg="white",
+                                activebackground="#c43d3d", command=self.send_fi_key)
+        self.fi_btn.pack(fill="x", pady=(0,6))
+
+        # Self button (blue) - now colored and placed with other right-side buttons
+        self.self_btn = tk.Button(right_frame, text="self", bg="#4da6ff", fg="white",
+                                  activebackground="#3399ff", command=self.send_self_key)
+        self.self_btn.pack(fill="x", pady=(0,8))
 
         ttk.Checkbutton(right_frame, text="Show HEX", variable=self.show_hex).pack(anchor="w")
         ttk.Checkbutton(right_frame, text="Timestamps", variable=self.show_timestamp).pack(anchor="w")
@@ -154,14 +166,6 @@ class SerialTerminal(tk.Tk):
 
         send_btn = ttk.Button(bottom_frame, text="Send", command=self.send_data, width=12)
         send_btn.grid(row=0, column=4)
-
-        # NEW BUTTON: Full (pale green) at bottom-right to send predefined full key
-        # Use a regular tk.Button to allow background color on most platforms
-        self.full_btn = tk.Button(bottom_frame, text="Full", bg="#dff7df", activebackground="#c9f0c7",
-                                   command=self.send_full_key, width=8)
-        # ensure column exists and place to the right
-        bottom_frame.columnconfigure(5, weight=0)
-        self.full_btn.grid(row=0, column=5, sticky="e", padx=(8,0))
 
         # Status bar
         self.status_var = tk.StringVar(value="Closed")
@@ -371,6 +375,28 @@ class SerialTerminal(tk.Tk):
             self._display_sent(ts, data)
         except Exception as e:
             messagebox.showerror("Send", f"Failed to send FULL key:\n{e}")
+
+    def send_fi_key(self):
+        """Send the Fi packet (user-provided hex). Handles stray '0x' if present."""
+        if not self.serial_port or not self.serial_port.is_open:
+            messagebox.showwarning("Send", "Serial port is not open.")
+            return
+        # original requested string: "FA704F460102030405060708090A0B0xCF5AAA55"
+        raw = "FA704F460102030405060708090A0B0xCF5AAA55"
+        # remove any '0x' or 'x' markers and keep only hex chars
+        cleaned = raw.replace("0x", "").replace("0X", "").replace("x", "").replace("X", "")
+        cleaned = "".join(ch for ch in cleaned if ch in "0123456789abcdefABCDEF")
+        try:
+            data = bytes.fromhex(cleaned)
+        except Exception as e:
+            messagebox.showerror("Send", f"Invalid Fi hex payload after cleaning:\n{e}")
+            return
+        try:
+            self.serial_port.write(data)
+            ts = time.time()
+            self._display_sent(ts, data)
+        except Exception as e:
+            messagebox.showerror("Send", f"Failed to send FI key:\n{e}")
 
     def _display_sent(self, ts, data: bytes):
         if self.show_hex.get():
