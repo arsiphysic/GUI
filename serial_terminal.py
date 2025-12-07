@@ -2,37 +2,11 @@
 """
 serial_terminal.py
 
-A simple serial port terminal GUI using Tkinter and pyserial.
+Serial port terminal GUI (Tkinter + pyserial)
 
-Features:
-- Port selection (enumerates serial ports)
-- Baudrate, Data bits, Parity, Stop bits, Flow control selection
-- Open / Close port
-- Received data display (ASCII or HEX) with optional timestamps
-- Input box for sending data, options to append newline or send as hex
-- Background reader thread with queue to safely update the GUI
-- Save log / Clear display
-
-Fi packet format (bytes are 1-based):
-1-2:  FA 70         (header)
-3-5:  4F 46 0B      (fixed)
-6-16: DATA (11 bytes) where:
-      6-7:  Vc (2 bytes, big-endian)
-      8-9:  H  (2 bytes, big-endian)
-      10:   00
-      11:   'C' (0x43)
-      12:   'N' (0x4E)
-      13:   00
-      14:   Ready -> ASCII 'R' if checked else 0x00
-      15:   Tar_Det -> ASCII 'D' if checked else 0x00
-      16:   Exp -> ASCII 'X' if checked else 0x00
-17-18: CRC-16/CCITT (False) over bytes 6..16 (poly=0x1021, init=0xFFFF), big-endian (hi,lo)
-19-20: AA 55         (footer)
-
-New feature: Time Interval (seconds) box:
-- If Time Interval > 0 and a packet button (Full / Fi / self) is toggled, that button "stays in" and the associated packet is repeatedly sent every Time Interval seconds.
-- If Time Interval == 0 the packet is sent only once.
-- Live updates: while repeating, if Vc/H or checkboxes change, subsequent packets will use the updated values.
+Fixed repeating/send logic so buttons کار می‌کنند وقتی Time Interval > 0.
+Added "Stop All" button and better validation / error messages.
+Time Interval is in milliseconds.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -41,7 +15,6 @@ import threading
 import queue
 import time
 import sys
-from typing import Optional
 
 try:
     import serial
@@ -53,17 +26,17 @@ APP_TITLE = "Serial Terminal"
 DEFAULT_ENCODING = "utf-8"
 
 COMMON_BAUDRATES = [
-    "300","1200","2400","4800","9600","14400","19200","38400","57600","115200","230400","460800","921600"
+    "300", "1200", "2400", "4800", "9600", "14400", "19200", "38400", "57600", "115200", "230400", "460800",
+    "921600"
 ]
-DATA_BITS = ["5","6","7","8"]
-PARITIES = ["N","E","O","M","S"]  # None, Even, Odd, Mark, Space
-STOP_BITS = ["1","1.5","2"]
-FLOW_CONTROLS = ["None","RTS/CTS","XON/XOFF"]
+DATA_BITS = ["5", "6", "7", "8"]
+PARITIES = ["N", "E", "O", "M", "S"]  # None, Even, Odd, Mark, Space
+STOP_BITS = ["1", "1.5", "2"]
+FLOW_CONTROLS = ["None", "RTS/CTS", "XON/XOFF"]
 
 READ_TIMEOUT = 0.1  # seconds
 
 
-# CRC-16/CCITT (False): poly=0x1021 init=0xFFFF xorout=0x0000, no reflection
 def crc16_ccitt_false(data: bytes, poly: int = 0x1021, init: int = 0xFFFF) -> int:
     crc = init
     for b in data:
@@ -80,7 +53,7 @@ class SerialTerminal(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("900x600")
+        self.geometry("1280x820")
 
         # serial
         self.serial_port = None
@@ -102,14 +75,15 @@ class SerialTerminal(tk.Tk):
         self.vc_var = tk.StringVar(value="0")   # decimal 0..65535
         self.h_var = tk.StringVar(value="0")    # decimal 0..65535
 
-        # Time interval (seconds) for repeating packets
-        self.time_interval_var = tk.StringVar(value="0")  # float or integer seconds
+        # Time interval (milliseconds) for repeating packets
+        self.time_interval_var = tk.StringVar(value="0")  # ms as integer
 
-        # Repeat control state: store after ids and running flags
+        # Repeat control state
         self._repeat_after_ids = {"full": None, "fi": None, "self": None}
         self._repeat_running = {"full": False, "fi": False, "self": False}
 
         # Build UI
+        self._setup_style()
         self._build_widgets()
         self._bind_shortcuts()
 
@@ -119,135 +93,142 @@ class SerialTerminal(tk.Tk):
         # Start periodic queue check
         self.after(100, self._process_rx_queue)
 
+    def _setup_style(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        default_font = ("Segoe UI", 10)
+        style.configure(".", font=default_font)
+        style.configure("Title.TLabel", font=("Segoe UI", 11, "bold"))
+
     def _build_widgets(self):
-        # Top frame: settings
-        top_frame = ttk.Frame(self, padding=(6,6))
+        top_frame = ttk.Frame(self, padding=(8, 8))
         top_frame.pack(fill="x", side="top")
 
-        # Port list and refresh
-        ttk.Label(top_frame, text="Port:").grid(row=0, column=0, sticky="w")
-        self.port_cb = ttk.Combobox(top_frame, width=16, state="readonly")
-        self.port_cb.grid(row=0, column=1, sticky="w", padx=(2,8))
-        ttk.Button(top_frame, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, sticky="w", padx=(0,8))
+        ttk.Label(top_frame, text="Port:", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        self.port_cb = ttk.Combobox(top_frame, width=18, state="readonly")
+        self.port_cb.grid(row=0, column=1, sticky="w", padx=(6, 8))
+        ttk.Button(top_frame, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, sticky="w", padx=(0, 8))
 
-        # Baudrate
-        ttk.Label(top_frame, text="Baud:").grid(row=0, column=3, sticky="w")
-        self.baud_cb = ttk.Combobox(top_frame, values=COMMON_BAUDRATES, width=10, state="readonly")
+        ttk.Label(top_frame, text="Baud:", style="Title.TLabel").grid(row=0, column=3, sticky="w")
+        self.baud_cb = ttk.Combobox(top_frame, values=COMMON_BAUDRATES, width=12, state="readonly")
         self.baud_cb.set("9600")
-        self.baud_cb.grid(row=0, column=4, sticky="w", padx=(2,8))
+        self.baud_cb.grid(row=0, column=4, sticky="w", padx=(6, 8))
 
-        # Data bits
         ttk.Label(top_frame, text="Data bits:").grid(row=0, column=5, sticky="w")
-        self.data_bits_cb = ttk.Combobox(top_frame, values=DATA_BITS, width=4, state="readonly")
+        self.data_bits_cb = ttk.Combobox(top_frame, values=DATA_BITS, width=6, state="readonly")
         self.data_bits_cb.set("8")
-        self.data_bits_cb.grid(row=0, column=6, sticky="w", padx=(2,8))
+        self.data_bits_cb.grid(row=0, column=6, sticky="w", padx=(6, 8))
 
-        # Parity
         ttk.Label(top_frame, text="Parity:").grid(row=0, column=7, sticky="w")
-        self.parity_cb = ttk.Combobox(top_frame, values=PARITIES, width=4, state="readonly")
+        self.parity_cb = ttk.Combobox(top_frame, values=PARITIES, width=6, state="readonly")
         self.parity_cb.set("N")
-        self.parity_cb.grid(row=0, column=8, sticky="w", padx=(2,8))
+        self.parity_cb.grid(row=0, column=8, sticky="w", padx=(6, 8))
 
-        # Stop bits
         ttk.Label(top_frame, text="Stop bits:").grid(row=0, column=9, sticky="w")
-        self.stop_bits_cb = ttk.Combobox(top_frame, values=STOP_BITS, width=4, state="readonly")
+        self.stop_bits_cb = ttk.Combobox(top_frame, values=STOP_BITS, width=6, state="readonly")
         self.stop_bits_cb.set("1")
-        self.stop_bits_cb.grid(row=0, column=10, sticky="w", padx=(2,8))
+        self.stop_bits_cb.grid(row=0, column=10, sticky="w", padx=(6, 8))
 
-        # Flow control
         ttk.Label(top_frame, text="Flow:").grid(row=0, column=11, sticky="w")
-        self.flow_cb = ttk.Combobox(top_frame, values=FLOW_CONTROLS, width=10, state="readonly")
+        self.flow_cb = ttk.Combobox(top_frame, values=FLOW_CONTROLS, width=12, state="readonly")
         self.flow_cb.set("None")
-        self.flow_cb.grid(row=0, column=12, sticky="w", padx=(2,8))
+        self.flow_cb.grid(row=0, column=12, sticky="w", padx=(6, 8))
 
-        # Open / Close button
-        self.open_btn = ttk.Button(top_frame, text="Open", command=self.toggle_port, width=10)
-        self.open_btn.grid(row=0, column=13, padx=(8,0))
+        self.open_btn = ttk.Button(top_frame, text="Open", command=self.toggle_port, width=12)
+        self.open_btn.grid(row=0, column=13, padx=(8, 0))
 
-        # Middle frame: received text
-        mid_frame = ttk.Frame(self)
-        mid_frame.pack(fill="both", expand=True, padx=6, pady=(4,0))
+        main_frame = ttk.Frame(self, padding=(8, 6))
+        main_frame.pack(fill="both", expand=True)
 
-        self.rx_text = ScrolledText(mid_frame, wrap="none", state="normal", height=20)
-        self.rx_text.pack(fill="both", expand=True, side="left")
-        self.rx_text.configure(font=("Consolas", 11))
+        rx_frame = ttk.Labelframe(main_frame, text="Received / Log", padding=(6, 6))
+        rx_frame.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=(0, 6))
 
-        # Right side controls
-        right_frame = ttk.Frame(mid_frame, width=260)
-        right_frame.pack(fill="y", side="right", padx=(6,0))
+        self.rx_text = ScrolledText(rx_frame, wrap="none", state="normal", height=25)
+        self.rx_text.pack(fill="both", expand=True)
+        self.rx_text.configure(font=("Consolas", 11), background="#1e1e1e", foreground="#e6e6e6", insertbackground="white")
 
-        ttk.Button(right_frame, text="Clear", command=self.clear_display).pack(fill="x", pady=(0,4))
-        ttk.Button(right_frame, text="Save Log", command=self.save_log).pack(fill="x", pady=(0,8))
+        right_frame = ttk.Frame(main_frame, width=360)
+        right_frame.pack(side="right", fill="y")
 
-        # Full button (stronger green) placed higher (right frame)
-        self.full_btn = tk.Button(right_frame, text="Full", bg="#28a745", fg="white",
-                                  activebackground="#1e7e34", command=self._toggle_repeat_full)
-        self.full_btn.pack(fill="x", pady=(0,6))
+        actions_frame = ttk.Frame(right_frame)
+        actions_frame.pack(fill="x", pady=(0, 6))
+        ttk.Label(actions_frame, text="Actions:", style="Title.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
 
-        # Fi button (red) - sends the Fi packet (now rebuilt from GUI fields)
-        self.fi_btn = tk.Button(right_frame, text="Fi", bg="#d9534f", fg="white",
-                                activebackground="#c43d3d", command=self._toggle_repeat_fi)
-        self.fi_btn.pack(fill="x", pady=(0,6))
+        top_buttons = ttk.Frame(actions_frame)
+        top_buttons.grid(row=0, column=1, sticky="e")
+        ttk.Button(top_buttons, text="Clear", command=self.clear_display).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(top_buttons, text="Save Log", command=self.save_log).grid(row=0, column=1, padx=(0,6))
+        ttk.Button(top_buttons, text="Stop All", command=self._stop_all).grid(row=0, column=2)
 
-        # Self button (blue)
-        self.self_btn = tk.Button(right_frame, text="self", bg="#007bff", fg="white",
-                                  activebackground="#0069d9", command=self._toggle_repeat_self)
-        self.self_btn.pack(fill="x", pady=(0,8))
+        btn_frame = ttk.Frame(actions_frame)
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        btn_frame.columnconfigure((0, 1, 2), weight=1)
 
-        # Fi-related controls
-        ttk.Label(right_frame, text="Fi options:", font=("", 10, "bold")).pack(anchor="w", pady=(4,2), padx=2)
+        self.full_btn = tk.Button(btn_frame, text="Full", bg="#28a745", fg="white", activebackground="#1e7e34",
+                                  command=self._toggle_repeat_full)
+        self.full_btn.grid(row=0, column=0, sticky="we", padx=(0, 6))
 
-        # Vc input (two bytes)
-        vc_frame = ttk.Frame(right_frame)
-        vc_frame.pack(fill="x", pady=(2,2), padx=2)
+        self.fi_btn = tk.Button(btn_frame, text="Fi", bg="#d9534f", fg="white", activebackground="#c43d3d",
+                                command=self._toggle_repeat_fi)
+        self.fi_btn.grid(row=0, column=1, sticky="we", padx=(0, 6))
+
+        self.self_btn = tk.Button(btn_frame, text="self", bg="#007bff", fg="white", activebackground="#0069d9",
+                                  command=self._toggle_repeat_self)
+        self.self_btn.grid(row=0, column=2, sticky="we")
+
+        fi_frame = ttk.Labelframe(right_frame, text="Fi packet options", padding=(8, 8))
+        fi_frame.pack(fill="x", pady=(6, 6))
+
+        vc_frame = ttk.Frame(fi_frame)
+        vc_frame.pack(fill="x", pady=(4, 4))
         ttk.Label(vc_frame, text="Vc (0..65535):").grid(row=0, column=0, sticky="w")
-        self.vc_entry = ttk.Entry(vc_frame, textvariable=self.vc_var, width=10)
-        self.vc_entry.grid(row=0, column=1, sticky="e", padx=(6,0))
+        self.vc_entry = ttk.Entry(vc_frame, textvariable=self.vc_var, width=14)
+        self.vc_entry.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
-        # H input (two bytes)
-        h_frame = ttk.Frame(right_frame)
-        h_frame.pack(fill="x", pady=(2,2), padx=2)
+        h_frame = ttk.Frame(fi_frame)
+        h_frame.pack(fill="x", pady=(2, 4))
         ttk.Label(h_frame, text="H  (0..65535):").grid(row=0, column=0, sticky="w")
-        self.h_entry = ttk.Entry(h_frame, textvariable=self.h_var, width=10)
-        self.h_entry.grid(row=0, column=1, sticky="e", padx=(6,0))
+        self.h_entry = ttk.Entry(h_frame, textvariable=self.h_var, width=14)
+        self.h_entry.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
-        # Time Interval input
-        ti_frame = ttk.Frame(right_frame)
-        ti_frame.pack(fill="x", pady=(4,2), padx=2)
-        ttk.Label(ti_frame, text="Time Interval (s):").grid(row=0, column=0, sticky="w")
-        self.time_interval_entry = ttk.Entry(ti_frame, textvariable=self.time_interval_var, width=10)
-        self.time_interval_entry.grid(row=0, column=1, sticky="e", padx=(6,0))
-        ttk.Label(ti_frame, text="0 => send once").grid(row=1, column=0, columnspan=2, sticky="w", padx=2)
+        ti_frame = ttk.Frame(fi_frame)
+        ti_frame.pack(fill="x", pady=(2, 4))
+        ttk.Label(ti_frame, text="Time Interval (ms):").grid(row=0, column=0, sticky="w")
+        self.time_interval_entry = ttk.Entry(ti_frame, textvariable=self.time_interval_var, width=14)
+        self.time_interval_entry.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        ttk.Label(ti_frame, text="0 => send once").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # Checkboxes Ready, Tar_Det, Exp
-        cb_frame = ttk.Frame(right_frame)
-        cb_frame.pack(fill="x", pady=(6,4), padx=2)
+        cb_frame = ttk.Frame(fi_frame)
+        cb_frame.pack(fill="x", pady=(6, 4))
         ttk.Checkbutton(cb_frame, text="Ready", variable=self.ready_var).grid(row=0, column=0, sticky="w", padx=2)
         ttk.Checkbutton(cb_frame, text="Tar_Det", variable=self.tar_det_var).grid(row=0, column=1, sticky="w", padx=2)
         ttk.Checkbutton(cb_frame, text="Exp", variable=self.exp_var).grid(row=0, column=2, sticky="w", padx=2)
 
-        ttk.Checkbutton(right_frame, text="Show HEX", variable=self.show_hex).pack(anchor="w", pady=(6,0), padx=2)
-        ttk.Checkbutton(right_frame, text="Timestamps", variable=self.show_timestamp).pack(anchor="w", padx=2)
+        opts_frame = ttk.Frame(right_frame)
+        opts_frame.pack(fill="x", pady=(6, 6))
+        ttk.Checkbutton(opts_frame, text="Show HEX", variable=self.show_hex).grid(row=0, column=0, sticky="w", padx=2)
+        ttk.Checkbutton(opts_frame, text="Timestamps", variable=self.show_timestamp).grid(row=0, column=1, sticky="w", padx=2)
 
-        # Bottom frame: send box
-        bottom_frame = ttk.Frame(self, padding=(6,6))
+        bottom_frame = ttk.Frame(self, padding=(8, 8))
         bottom_frame.pack(fill="x", side="bottom")
 
-        ttk.Label(bottom_frame, text="Send:").grid(row=0, column=0, sticky="w")
+        ttk.Label(bottom_frame, text="Send:", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         self.send_entry = ttk.Entry(bottom_frame)
-        self.send_entry.grid(row=0, column=1, sticky="we", padx=(4,8))
+        self.send_entry.grid(row=0, column=1, sticky="we", padx=(8, 8))
         bottom_frame.columnconfigure(1, weight=1)
 
         self.append_newline_cb = ttk.Checkbutton(bottom_frame, text="Append \\n", variable=self.append_newline)
-        self.append_newline_cb.grid(row=0, column=2, padx=(0,8))
+        self.append_newline_cb.grid(row=0, column=2, padx=(0, 8))
 
         self.send_hex_cb = ttk.Checkbutton(bottom_frame, text="Send as HEX", variable=self.send_as_hex)
-        self.send_hex_cb.grid(row=0, column=3, padx=(0,8))
+        self.send_hex_cb.grid(row=0, column=3, padx=(0, 8))
 
-        send_btn = ttk.Button(bottom_frame, text="Send", command=self.send_data, width=12)
+        send_btn = ttk.Button(bottom_frame, text="Send", command=self.send_data, width=14)
         send_btn.grid(row=0, column=4)
 
-        # Status bar
         self.status_var = tk.StringVar(value="Closed")
         status = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w")
         status.pack(fill="x", side="bottom", ipady=2)
@@ -262,13 +243,9 @@ class SerialTerminal(tk.Tk):
         if serial:
             ports_info = serial.tools.list_ports.comports()
             ports = [p.device for p in ports_info]
-        else:
-            # If pyserial not installed, show placeholder
-            ports = []
         if not ports:
             ports = ["(no ports)"]
         self.port_cb['values'] = ports
-        # set first real port if available
         if ports and ports[0] != "(no ports)":
             self.port_cb.set(ports[0])
         else:
@@ -298,16 +275,13 @@ class SerialTerminal(tk.Tk):
             messagebox.showerror("Settings", f"Invalid serial settings: {e}")
             return
 
-        # Map parity
         parity_map = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD,
                       "M": serial.PARITY_MARK, "S": serial.PARITY_SPACE}
         parity_val = parity_map.get(parity, serial.PARITY_NONE)
 
-        # Map stop bits
         stop_map = {"1": serial.STOPBITS_ONE, "1.5": serial.STOPBITS_ONE_POINT_FIVE, "2": serial.STOPBITS_TWO}
         stopbits = stop_map.get(self.stop_bits_cb.get(), serial.STOPBITS_ONE)
 
-        # Flow control mapping
         rtscts = False
         xonxoff = False
         flow = self.flow_cb.get()
@@ -335,16 +309,12 @@ class SerialTerminal(tk.Tk):
         if self.serial_port and self.serial_port.is_open:
             self.open_btn.config(text="Close")
             self.status_var.set(f"Open: {port} @ {baud}")
-            # start reader thread
             self.alive.set()
             self.reader_thread = threading.Thread(target=self._reader_worker, daemon=True)
             self.reader_thread.start()
 
     def close_port(self):
-        # Stop any repeating sends first
-        for name in list(self._repeat_running.keys()):
-            if self._repeat_running.get(name):
-                self._stop_repeat(name)
+        self._stop_all()
         self.alive.clear()
         if self.reader_thread:
             self.reader_thread.join(timeout=0.5)
@@ -360,7 +330,6 @@ class SerialTerminal(tk.Tk):
             self.status_var.set("Closed")
 
     def _reader_worker(self):
-        # Read from serial and put bytes into queue
         try:
             while self.alive.is_set() and self.serial_port and self.serial_port.is_open:
                 try:
@@ -377,7 +346,6 @@ class SerialTerminal(tk.Tk):
         return
 
     def _process_rx_queue(self):
-        # Called periodically in main thread to drain queue and update text widget
         try:
             while True:
                 ts, data = self.rx_queue.get_nowait()
@@ -428,7 +396,6 @@ class SerialTerminal(tk.Tk):
             messagebox.showerror("Send", f"Failed to send data:\n{e}")
 
     def send_self_key(self):
-        """Send the fixed hex sequence FA70544300E1F0AA55 over serial."""
         if not self.serial_port or not self.serial_port.is_open:
             messagebox.showwarning("Send", "Serial port is not open.")
             return
@@ -441,7 +408,6 @@ class SerialTerminal(tk.Tk):
             messagebox.showerror("Send", f"Failed to send SELF key:\n{e}")
 
     def send_full_key(self):
-        """Send the fixed hex sequence FA70464300E1F0AA55 over serial."""
         if not self.serial_port or not self.serial_port.is_open:
             messagebox.showwarning("Send", "Serial port is not open.")
             return
@@ -454,18 +420,10 @@ class SerialTerminal(tk.Tk):
             messagebox.showerror("Send", f"Failed to send FULL key:\n{e}")
 
     def _build_fi_packet(self) -> bytes:
-        """
-        Build Fi packet according to spec:
-        FA70 | 4F 46 0B | DATA(11 bytes: Vc(2), H(2), 0x00, 'C','N',0x00, Ready, Tar_Det, Exp)
-        CRC16 (bytes 17-18) computed over bytes 6..16 (i.e., the 11 DATA bytes)
-        AA55 footer
-        """
-        # Header + fixed
         packet = bytearray()
         packet += bytes.fromhex("FA70")
         packet += bytes.fromhex("4F460B")
 
-        # Bytes 6-7: Vc (user input)
         try:
             vc_val = int(self.vc_var.get())
         except Exception:
@@ -474,7 +432,6 @@ class SerialTerminal(tk.Tk):
             raise ValueError("Vc must be 0..65535")
         packet += vc_val.to_bytes(2, "big")
 
-        # Bytes 8-9: H (user input)
         try:
             h_val = int(self.h_var.get())
         except Exception:
@@ -483,41 +440,21 @@ class SerialTerminal(tk.Tk):
             raise ValueError("H must be 0..65535")
         packet += h_val.to_bytes(2, "big")
 
-        # Byte 10: always 0
-        packet += bytes([0x00])
+        packet += bytes([0x00])  # Byte 10
+        packet += b"C"           # Byte 11
+        packet += b"N"           # Byte 12
+        packet += bytes([0x00])  # Byte 13
+        packet += (b"R" if self.ready_var.get() else bytes([0x00]))   # 14
+        packet += (b"D" if self.tar_det_var.get() else bytes([0x00])) # 15
+        packet += (b"X" if self.exp_var.get() else bytes([0x00]))     # 16
 
-        # Byte 11: ASCII 'C'
-        packet += b"C"
-
-        # Byte 12: ASCII 'N'
-        packet += b"N"
-
-        # Byte 13: always 0
-        packet += bytes([0x00])
-
-        # Byte 14: Ready -> 'R' or 0
-        packet += (b"R" if self.ready_var.get() else bytes([0x00]))
-
-        # Byte 15: Tar_Det -> 'D' or 0
-        packet += (b"D" if self.tar_det_var.get() else bytes([0x00]))
-
-        # Byte 16: Exp -> 'X' or 0
-        packet += (b"X" if self.exp_var.get() else bytes([0x00]))
-
-        # At this point packet length should be 16 bytes (indices 0..15)
-        # CRC computed over bytes 6..16 (1-based) -> zero-based slice [5:16]
         data_for_crc = bytes(packet[5:16])
         crc = crc16_ccitt_false(data_for_crc)
-        # Append CRC as big-endian hi, lo
         packet += crc.to_bytes(2, "big")
-
-        # Footer AA55
         packet += bytes.fromhex("AA55")
-
         return bytes(packet)
 
     def send_fi_key(self):
-        """Build Fi packet from GUI fields and send it once."""
         if not self.serial_port or not self.serial_port.is_open:
             messagebox.showwarning("Send", "Serial port is not open.")
             return
@@ -533,70 +470,61 @@ class SerialTerminal(tk.Tk):
         except Exception as e:
             messagebox.showerror("Send", f"Failed to send Fi packet:\n{e}")
 
-    # ---------- Repeating send machinery ----------
-    def _parse_time_interval(self) -> float:
-        """Return interval in seconds (float). Non-negative. On parse error default to 0."""
+    # ---------- Repeating send machinery (milliseconds) ----------
+    def _parse_time_interval_ms(self) -> int:
         try:
             v = float(self.time_interval_var.get())
-            if v < 0:
-                return 0.0
-            return v
+            ms = int(max(0.0, v))
+            return ms
         except Exception:
-            return 0.0
+            return 0
 
     def _start_repeat(self, name: str, send_callable, button_widget: tk.Button):
-        """
-        Start repeating send_callable at interval seconds (read live).
+        """Start repeating send_callable at interval milliseconds (read live).
         If interval == 0 then call once and do not start repeating.
-        name: one of 'full','fi','self'
         """
         if self._repeat_running.get(name):
-            return  # already running
+            return
 
-        interval = self._parse_time_interval()
-        if interval <= 0:
-            # just send once
+        interval_ms = self._parse_time_interval_ms()
+        if interval_ms <= 0:
+            # send once
             try:
                 send_callable()
             except Exception as e:
                 messagebox.showerror("Send", f"Failed to send {name} packet:\n{e}")
             return
 
-        # mark running and change button appearance
+        # begin repeating
         self._repeat_running[name] = True
-        # visually indicate "pressed in"
-        button_widget.config(relief="sunken")
+        # visual
+        button_widget.config(relief="sunken", bg=self._active_button_color(button_widget))
 
         def _repeat_step():
-            # send using up-to-date GUI values
             if not self._repeat_running.get(name):
                 return
             try:
                 send_callable()
             except Exception as e:
-                # show error but continue attempts; could stop if needed
+                # show error but continue attempts
                 messagebox.showerror("Send", f"Failed to send {name} packet:\n{e}")
-                # stop repeating on serious error? currently continue
-            # After sending, decide next interval using latest value
-            interval_now = self._parse_time_interval()
-            if interval_now <= 0:
-                # stop repeating (user set to 0)
+            # read current interval (live update)
+            next_ms = self._parse_time_interval_ms()
+            if next_ms <= 0:
                 self._stop_repeat(name)
                 return
-            after_id = self.after(int(interval_now * 1000), _repeat_step)
+            after_id = self.after(next_ms, _repeat_step)
             self._repeat_after_ids[name] = after_id
 
-        # initial immediate send, then schedule next
+        # initial send then schedule next
         try:
             send_callable()
         except Exception as e:
             messagebox.showerror("Send", f"Failed to send {name} packet:\n{e}")
-            # still start repeating if user desires
-        after_id = self.after(int(interval * 1000), _repeat_step)
+        after_id = self.after(interval_ms, _repeat_step)
         self._repeat_after_ids[name] = after_id
 
     def _stop_repeat(self, name: str):
-        """Stop repeating for the given name and restore button look."""
         if not self._repeat_running.get(name):
             return
         after_id = self._repeat_after_ids.get(name)
@@ -607,15 +535,31 @@ class SerialTerminal(tk.Tk):
                 pass
         self._repeat_after_ids[name] = None
         self._repeat_running[name] = False
-        # restore button appearance
         if name == "full":
-            self.full_btn.config(relief="raised")
+            self.full_btn.config(relief="raised", bg="#28a745")
         elif name == "fi":
-            self.fi_btn.config(relief="raised")
+            self.fi_btn.config(relief="raised", bg="#d9534f")
         elif name == "self":
-            self.self_btn.config(relief="raised")
+            self.self_btn.config(relief="raised", bg="#007bff")
 
-    # Toggle functions bound to buttons
+    def _stop_all(self):
+        for name in list(self._repeat_running.keys()):
+            if self._repeat_running.get(name):
+                self._stop_repeat(name)
+
+    def _active_button_color(self, btn: tk.Button) -> str:
+        try:
+            orig = btn.cget("bg")
+            if orig.lower().startswith("#28"):
+                return "#1e7e34"
+            if orig.lower().startswith("#d9"):
+                return "#c43d3d"
+            if orig.lower().startswith("#00") or orig.lower().startswith("#4d"):
+                return "#0069d9"
+        except Exception:
+            pass
+        return btn.cget("bg")
+
     def _toggle_repeat_full(self):
         if self._repeat_running.get("full"):
             self._stop_repeat("full")
@@ -663,7 +607,7 @@ class SerialTerminal(tk.Tk):
 
     def save_log(self):
         fname = filedialog.asksaveasfilename(defaultextension=".txt",
-                                             filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+                                             filetypes=[("Text files", ".txt"), ("All files", "*.*")])
         if not fname:
             return
         try:
@@ -675,10 +619,7 @@ class SerialTerminal(tk.Tk):
             messagebox.showerror("Save", f"Failed to save log:\n{e}")
 
     def on_close(self):
-        # cleanup: stop repeats and close port
-        for name in list(self._repeat_running.keys()):
-            if self._repeat_running.get(name):
-                self._stop_repeat(name)
+        self._stop_all()
         self.close_port()
         self.destroy()
 
