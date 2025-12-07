@@ -13,7 +13,7 @@ Features:
 - Background reader thread with queue to safely update the GUI
 - Save log / Clear display
 
-Fire packet format used here (bytes are 1-based):
+Fi packet format (bytes are 1-based):
 1-2:  FA 70         (header)
 3-5:  4F 46 0B      (fixed)
 6-16: DATA (11 bytes) where:
@@ -29,7 +29,10 @@ Fire packet format used here (bytes are 1-based):
 17-18: CRC-16/CCITT (False) over bytes 6..16 (poly=0x1021, init=0xFFFF), big-endian (hi,lo)
 19-20: AA 55         (footer)
 
-Requires: pyserial (pip install pyserial)
+New feature: Time Interval (seconds) box:
+- If Time Interval > 0 and a packet button (Full / Fi / self) is toggled, that button "stays in" and the associated packet is repeatedly sent every Time Interval seconds.
+- If Time Interval == 0 the packet is sent only once.
+- Live updates: while repeating, if Vc/H or checkboxes change, subsequent packets will use the updated values.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -38,12 +41,12 @@ import threading
 import queue
 import time
 import sys
-from typing import Tuple
+from typing import Optional
 
 try:
     import serial
     import serial.tools.list_ports
-except Exception as e:
+except Exception:
     serial = None  # handle later
 
 APP_TITLE = "Serial Terminal"
@@ -92,12 +95,19 @@ class SerialTerminal(tk.Tk):
         self.append_newline = tk.BooleanVar(value=False)
         self.send_as_hex = tk.BooleanVar(value=False)
 
-        # Fire-specific controls state
+        # Fi-specific controls state
         self.ready_var = tk.BooleanVar(value=False)
         self.tar_det_var = tk.BooleanVar(value=False)
         self.exp_var = tk.BooleanVar(value=False)
         self.vc_var = tk.StringVar(value="0")   # decimal 0..65535
         self.h_var = tk.StringVar(value="0")    # decimal 0..65535
+
+        # Time interval (seconds) for repeating packets
+        self.time_interval_var = tk.StringVar(value="0")  # float or integer seconds
+
+        # Repeat control state: store after ids and running flags
+        self._repeat_after_ids = {"full": None, "fi": None, "self": None}
+        self._repeat_running = {"full": False, "fi": False, "self": False}
 
         # Build UI
         self._build_widgets()
@@ -163,7 +173,7 @@ class SerialTerminal(tk.Tk):
         self.rx_text.configure(font=("Consolas", 11))
 
         # Right side controls
-        right_frame = ttk.Frame(mid_frame, width=220)
+        right_frame = ttk.Frame(mid_frame, width=260)
         right_frame.pack(fill="y", side="right", padx=(6,0))
 
         ttk.Button(right_frame, text="Clear", command=self.clear_display).pack(fill="x", pady=(0,4))
@@ -171,21 +181,21 @@ class SerialTerminal(tk.Tk):
 
         # Full button (stronger green) placed higher (right frame)
         self.full_btn = tk.Button(right_frame, text="Full", bg="#28a745", fg="white",
-                                  activebackground="#1e7e34", command=self.send_full_key)
+                                  activebackground="#1e7e34", command=self._toggle_repeat_full)
         self.full_btn.pack(fill="x", pady=(0,6))
 
-        # Fire button (red) - sends the Fire packet (now rebuilt from GUI fields)
-        self.fi_btn = tk.Button(right_frame, text="Fire", bg="#d9534f", fg="white",
-                                activebackground="#c43d3d", command=self.send_fi_key)
+        # Fi button (red) - sends the Fi packet (now rebuilt from GUI fields)
+        self.fi_btn = tk.Button(right_frame, text="Fi", bg="#d9534f", fg="white",
+                                activebackground="#c43d3d", command=self._toggle_repeat_fi)
         self.fi_btn.pack(fill="x", pady=(0,6))
 
         # Self button (blue)
         self.self_btn = tk.Button(right_frame, text="self", bg="#007bff", fg="white",
-                                  activebackground="#0069d9", command=self.send_self_key)
+                                  activebackground="#0069d9", command=self._toggle_repeat_self)
         self.self_btn.pack(fill="x", pady=(0,8))
 
-        # Fire-related controls
-        ttk.Label(right_frame, text="Fire options:", font=("", 10, "bold")).pack(anchor="w", pady=(4,2), padx=2)
+        # Fi-related controls
+        ttk.Label(right_frame, text="Fi options:", font=("", 10, "bold")).pack(anchor="w", pady=(4,2), padx=2)
 
         # Vc input (two bytes)
         vc_frame = ttk.Frame(right_frame)
@@ -200,6 +210,14 @@ class SerialTerminal(tk.Tk):
         ttk.Label(h_frame, text="H  (0..65535):").grid(row=0, column=0, sticky="w")
         self.h_entry = ttk.Entry(h_frame, textvariable=self.h_var, width=10)
         self.h_entry.grid(row=0, column=1, sticky="e", padx=(6,0))
+
+        # Time Interval input
+        ti_frame = ttk.Frame(right_frame)
+        ti_frame.pack(fill="x", pady=(4,2), padx=2)
+        ttk.Label(ti_frame, text="Time Interval (s):").grid(row=0, column=0, sticky="w")
+        self.time_interval_entry = ttk.Entry(ti_frame, textvariable=self.time_interval_var, width=10)
+        self.time_interval_entry.grid(row=0, column=1, sticky="e", padx=(6,0))
+        ttk.Label(ti_frame, text="0 => send once").grid(row=1, column=0, columnspan=2, sticky="w", padx=2)
 
         # Checkboxes Ready, Tar_Det, Exp
         cb_frame = ttk.Frame(right_frame)
@@ -323,6 +341,10 @@ class SerialTerminal(tk.Tk):
             self.reader_thread.start()
 
     def close_port(self):
+        # Stop any repeating sends first
+        for name in list(self._repeat_running.keys()):
+            if self._repeat_running.get(name):
+                self._stop_repeat(name)
         self.alive.clear()
         if self.reader_thread:
             self.reader_thread.join(timeout=0.5)
@@ -346,15 +368,12 @@ class SerialTerminal(tk.Tk):
                 except Exception:
                     break
                 if data:
-                    # put a timestamped tuple
                     ts = time.time()
                     self.rx_queue.put((ts, data))
                 else:
-                    # no data, continue
                     continue
         except Exception:
             pass
-        # thread exiting
         return
 
     def _process_rx_queue(self):
@@ -365,12 +384,10 @@ class SerialTerminal(tk.Tk):
                 self._display_received(ts, data)
         except queue.Empty:
             pass
-        # reschedule
         self.after(100, self._process_rx_queue)
 
     def _display_received(self, ts, data: bytes):
         if self.show_hex.get():
-            # show spaced uppercase hex
             text = data.hex(" ").upper()
         else:
             try:
@@ -382,7 +399,6 @@ class SerialTerminal(tk.Tk):
             line = f"[{tstr}] {text}"
         else:
             line = text
-        # insert and autoscroll
         self.rx_text.configure(state="normal")
         self.rx_text.insert("end", line)
         if not line.endswith("\n"):
@@ -399,7 +415,6 @@ class SerialTerminal(tk.Tk):
             return
         try:
             if self.send_as_hex.get():
-                # Interpret payload as hex bytes separated by spaces or continuous hex
                 hexstr = payload.replace(" ", "")
                 data = bytes.fromhex(hexstr)
             else:
@@ -407,7 +422,6 @@ class SerialTerminal(tk.Tk):
                     payload = payload + "\n"
                 data = payload.encode(self.encoding)
             self.serial_port.write(data)
-            # optionally also show what we sent
             ts = time.time()
             self._display_sent(ts, data)
         except Exception as e:
@@ -441,7 +455,7 @@ class SerialTerminal(tk.Tk):
 
     def _build_fi_packet(self) -> bytes:
         """
-        Build Fire packet according to spec:
+        Build Fi packet according to spec:
         FA70 | 4F 46 0B | DATA(11 bytes: Vc(2), H(2), 0x00, 'C','N',0x00, Ready, Tar_Det, Exp)
         CRC16 (bytes 17-18) computed over bytes 6..16 (i.e., the 11 DATA bytes)
         AA55 footer
@@ -490,9 +504,8 @@ class SerialTerminal(tk.Tk):
         # Byte 16: Exp -> 'X' or 0
         packet += (b"X" if self.exp_var.get() else bytes([0x00]))
 
-        # At this point packet length should be 2 + 3 + 11 = 16 bytes
+        # At this point packet length should be 16 bytes (indices 0..15)
         # CRC computed over bytes 6..16 (1-based) -> zero-based slice [5:16]
-        # Our packet currently: indices 0..15 ; bytes 6..16 correspond to packet[5:16]
         data_for_crc = bytes(packet[5:16])
         crc = crc16_ccitt_false(data_for_crc)
         # Append CRC as big-endian hi, lo
@@ -504,21 +517,124 @@ class SerialTerminal(tk.Tk):
         return bytes(packet)
 
     def send_fi_key(self):
-        """Build Fire packet from GUI fields and send it."""
+        """Build Fi packet from GUI fields and send it once."""
         if not self.serial_port or not self.serial_port.is_open:
             messagebox.showwarning("Send", "Serial port is not open.")
             return
         try:
             pkt = self._build_fi_packet()
         except ValueError as e:
-            messagebox.showerror("Fire packet", f"Invalid Fire parameters:\n{e}")
+            messagebox.showerror("Fi packet", f"Invalid Fi parameters:\n{e}")
             return
         try:
             self.serial_port.write(pkt)
             ts = time.time()
             self._display_sent(ts, pkt)
         except Exception as e:
-            messagebox.showerror("Send", f"Failed to send Fire packet:\n{e}")
+            messagebox.showerror("Send", f"Failed to send Fi packet:\n{e}")
+
+    # ---------- Repeating send machinery ----------
+    def _parse_time_interval(self) -> float:
+        """Return interval in seconds (float). Non-negative. On parse error default to 0."""
+        try:
+            v = float(self.time_interval_var.get())
+            if v < 0:
+                return 0.0
+            return v
+        except Exception:
+            return 0.0
+
+    def _start_repeat(self, name: str, send_callable, button_widget: tk.Button):
+        """
+        Start repeating send_callable at interval seconds (read live).
+        If interval == 0 then call once and do not start repeating.
+        name: one of 'full','fi','self'
+        """
+        if self._repeat_running.get(name):
+            return  # already running
+
+        interval = self._parse_time_interval()
+        if interval <= 0:
+            # just send once
+            try:
+                send_callable()
+            except Exception as e:
+                messagebox.showerror("Send", f"Failed to send {name} packet:\n{e}")
+            return
+
+        # mark running and change button appearance
+        self._repeat_running[name] = True
+        # visually indicate "pressed in"
+        button_widget.config(relief="sunken")
+
+        def _repeat_step():
+            # send using up-to-date GUI values
+            if not self._repeat_running.get(name):
+                return
+            try:
+                send_callable()
+            except Exception as e:
+                # show error but continue attempts; could stop if needed
+                messagebox.showerror("Send", f"Failed to send {name} packet:\n{e}")
+                # stop repeating on serious error? currently continue
+            # After sending, decide next interval using latest value
+            interval_now = self._parse_time_interval()
+            if interval_now <= 0:
+                # stop repeating (user set to 0)
+                self._stop_repeat(name)
+                return
+            after_id = self.after(int(interval_now * 1000), _repeat_step)
+            self._repeat_after_ids[name] = after_id
+
+        # initial immediate send, then schedule next
+        try:
+            send_callable()
+        except Exception as e:
+            messagebox.showerror("Send", f"Failed to send {name} packet:\n{e}")
+            # still start repeating if user desires
+        after_id = self.after(int(interval * 1000), _repeat_step)
+        self._repeat_after_ids[name] = after_id
+
+    def _stop_repeat(self, name: str):
+        """Stop repeating for the given name and restore button look."""
+        if not self._repeat_running.get(name):
+            return
+        after_id = self._repeat_after_ids.get(name)
+        if after_id:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._repeat_after_ids[name] = None
+        self._repeat_running[name] = False
+        # restore button appearance
+        if name == "full":
+            self.full_btn.config(relief="raised")
+        elif name == "fi":
+            self.fi_btn.config(relief="raised")
+        elif name == "self":
+            self.self_btn.config(relief="raised")
+
+    # Toggle functions bound to buttons
+    def _toggle_repeat_full(self):
+        if self._repeat_running.get("full"):
+            self._stop_repeat("full")
+        else:
+            self._start_repeat("full", self.send_full_key, self.full_btn)
+
+    def _toggle_repeat_fi(self):
+        if self._repeat_running.get("fi"):
+            self._stop_repeat("fi")
+        else:
+            self._start_repeat("fi", self.send_fi_key, self.fi_btn)
+
+    def _toggle_repeat_self(self):
+        if self._repeat_running.get("self"):
+            self._stop_repeat("self")
+        else:
+            self._start_repeat("self", self.send_self_key, self.self_btn)
+
+    # ---------- end repeating machinery ----------
 
     def _display_sent(self, ts, data: bytes):
         if self.show_hex.get():
@@ -559,7 +675,10 @@ class SerialTerminal(tk.Tk):
             messagebox.showerror("Save", f"Failed to save log:\n{e}")
 
     def on_close(self):
-        # cleanup
+        # cleanup: stop repeats and close port
+        for name in list(self._repeat_running.keys()):
+            if self._repeat_running.get(name):
+                self._stop_repeat(name)
         self.close_port()
         self.destroy()
 
