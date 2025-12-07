@@ -12,6 +12,23 @@ Features:
 - Input box for sending data, options to append newline or send as hex
 - Background reader thread with queue to safely update the GUI
 - Save log / Clear display
+
+Fire packet format used here (bytes are 1-based):
+1-2:  FA 70         (header)
+3-5:  4F 46 0B      (fixed)
+6-16: DATA (11 bytes) where:
+      6-7:  Vc (2 bytes, big-endian)
+      8-9:  H  (2 bytes, big-endian)
+      10:   00
+      11:   'C' (0x43)
+      12:   'N' (0x4E)
+      13:   00
+      14:   Ready -> ASCII 'R' if checked else 0x00
+      15:   Tar_Det -> ASCII 'D' if checked else 0x00
+      16:   Exp -> ASCII 'X' if checked else 0x00
+17-18: CRC-16/CCITT (False) over bytes 6..16 (poly=0x1021, init=0xFFFF), big-endian (hi,lo)
+19-20: AA 55         (footer)
+
 Requires: pyserial (pip install pyserial)
 """
 import tkinter as tk
@@ -21,6 +38,7 @@ import threading
 import queue
 import time
 import sys
+from typing import Tuple
 
 try:
     import serial
@@ -42,6 +60,19 @@ FLOW_CONTROLS = ["None","RTS/CTS","XON/XOFF"]
 READ_TIMEOUT = 0.1  # seconds
 
 
+# CRC-16/CCITT (False): poly=0x1021 init=0xFFFF xorout=0x0000, no reflection
+def crc16_ccitt_false(data: bytes, poly: int = 0x1021, init: int = 0xFFFF) -> int:
+    crc = init
+    for b in data:
+        crc ^= (b << 8)
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) & 0xFFFF) ^ poly
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc & 0xFFFF
+
+
 class SerialTerminal(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -60,6 +91,13 @@ class SerialTerminal(tk.Tk):
         self.show_timestamp = tk.BooleanVar(value=False)
         self.append_newline = tk.BooleanVar(value=False)
         self.send_as_hex = tk.BooleanVar(value=False)
+
+        # Fire-specific controls state
+        self.ready_var = tk.BooleanVar(value=False)
+        self.tar_det_var = tk.BooleanVar(value=False)
+        self.exp_var = tk.BooleanVar(value=False)
+        self.vc_var = tk.StringVar(value="0")   # decimal 0..65535
+        self.h_var = tk.StringVar(value="0")    # decimal 0..65535
 
         # Build UI
         self._build_widgets()
@@ -125,29 +163,53 @@ class SerialTerminal(tk.Tk):
         self.rx_text.configure(font=("Consolas", 11))
 
         # Right side controls
-        right_frame = ttk.Frame(mid_frame, width=200)
+        right_frame = ttk.Frame(mid_frame, width=220)
         right_frame.pack(fill="y", side="right", padx=(6,0))
 
         ttk.Button(right_frame, text="Clear", command=self.clear_display).pack(fill="x", pady=(0,4))
         ttk.Button(right_frame, text="Save Log", command=self.save_log).pack(fill="x", pady=(0,8))
 
-        # Move Full up here and use a stronger green
-        self.full_btn = tk.Button(right_frame, text="Full", bg="#57b857", fg="white",
-                                  activebackground="#47a047", command=self.send_full_key)
+        # Full button (stronger green) placed higher (right frame)
+        self.full_btn = tk.Button(right_frame, text="Full", bg="#28a745", fg="white",
+                                  activebackground="#1e7e34", command=self.send_full_key)
         self.full_btn.pack(fill="x", pady=(0,6))
 
-        # Fi button (red) - sends the Fi packet
-        self.fi_btn = tk.Button(right_frame, text="Fi", bg="#d9534f", fg="white",
+        # Fire button (red) - sends the Fire packet (now rebuilt from GUI fields)
+        self.fi_btn = tk.Button(right_frame, text="Fire", bg="#d9534f", fg="white",
                                 activebackground="#c43d3d", command=self.send_fi_key)
         self.fi_btn.pack(fill="x", pady=(0,6))
 
-        # Self button (blue) - now colored and placed with other right-side buttons
-        self.self_btn = tk.Button(right_frame, text="self", bg="#4da6ff", fg="white",
-                                  activebackground="#3399ff", command=self.send_self_key)
+        # Self button (blue)
+        self.self_btn = tk.Button(right_frame, text="self", bg="#007bff", fg="white",
+                                  activebackground="#0069d9", command=self.send_self_key)
         self.self_btn.pack(fill="x", pady=(0,8))
 
-        ttk.Checkbutton(right_frame, text="Show HEX", variable=self.show_hex).pack(anchor="w")
-        ttk.Checkbutton(right_frame, text="Timestamps", variable=self.show_timestamp).pack(anchor="w")
+        # Fire-related controls
+        ttk.Label(right_frame, text="Fire options:", font=("", 10, "bold")).pack(anchor="w", pady=(4,2), padx=2)
+
+        # Vc input (two bytes)
+        vc_frame = ttk.Frame(right_frame)
+        vc_frame.pack(fill="x", pady=(2,2), padx=2)
+        ttk.Label(vc_frame, text="Vc (0..65535):").grid(row=0, column=0, sticky="w")
+        self.vc_entry = ttk.Entry(vc_frame, textvariable=self.vc_var, width=10)
+        self.vc_entry.grid(row=0, column=1, sticky="e", padx=(6,0))
+
+        # H input (two bytes)
+        h_frame = ttk.Frame(right_frame)
+        h_frame.pack(fill="x", pady=(2,2), padx=2)
+        ttk.Label(h_frame, text="H  (0..65535):").grid(row=0, column=0, sticky="w")
+        self.h_entry = ttk.Entry(h_frame, textvariable=self.h_var, width=10)
+        self.h_entry.grid(row=0, column=1, sticky="e", padx=(6,0))
+
+        # Checkboxes Ready, Tar_Det, Exp
+        cb_frame = ttk.Frame(right_frame)
+        cb_frame.pack(fill="x", pady=(6,4), padx=2)
+        ttk.Checkbutton(cb_frame, text="Ready", variable=self.ready_var).grid(row=0, column=0, sticky="w", padx=2)
+        ttk.Checkbutton(cb_frame, text="Tar_Det", variable=self.tar_det_var).grid(row=0, column=1, sticky="w", padx=2)
+        ttk.Checkbutton(cb_frame, text="Exp", variable=self.exp_var).grid(row=0, column=2, sticky="w", padx=2)
+
+        ttk.Checkbutton(right_frame, text="Show HEX", variable=self.show_hex).pack(anchor="w", pady=(6,0), padx=2)
+        ttk.Checkbutton(right_frame, text="Timestamps", variable=self.show_timestamp).pack(anchor="w", padx=2)
 
         # Bottom frame: send box
         bottom_frame = ttk.Frame(self, padding=(6,6))
@@ -308,6 +370,7 @@ class SerialTerminal(tk.Tk):
 
     def _display_received(self, ts, data: bytes):
         if self.show_hex.get():
+            # show spaced uppercase hex
             text = data.hex(" ").upper()
         else:
             try:
@@ -376,27 +439,86 @@ class SerialTerminal(tk.Tk):
         except Exception as e:
             messagebox.showerror("Send", f"Failed to send FULL key:\n{e}")
 
+    def _build_fi_packet(self) -> bytes:
+        """
+        Build Fire packet according to spec:
+        FA70 | 4F 46 0B | DATA(11 bytes: Vc(2), H(2), 0x00, 'C','N',0x00, Ready, Tar_Det, Exp)
+        CRC16 (bytes 17-18) computed over bytes 6..16 (i.e., the 11 DATA bytes)
+        AA55 footer
+        """
+        # Header + fixed
+        packet = bytearray()
+        packet += bytes.fromhex("FA70")
+        packet += bytes.fromhex("4F460B")
+
+        # Bytes 6-7: Vc (user input)
+        try:
+            vc_val = int(self.vc_var.get())
+        except Exception:
+            raise ValueError("Vc must be an integer 0..65535")
+        if vc_val < 0 or vc_val > 0xFFFF:
+            raise ValueError("Vc must be 0..65535")
+        packet += vc_val.to_bytes(2, "big")
+
+        # Bytes 8-9: H (user input)
+        try:
+            h_val = int(self.h_var.get())
+        except Exception:
+            raise ValueError("H must be an integer 0..65535")
+        if h_val < 0 or h_val > 0xFFFF:
+            raise ValueError("H must be 0..65535")
+        packet += h_val.to_bytes(2, "big")
+
+        # Byte 10: always 0
+        packet += bytes([0x00])
+
+        # Byte 11: ASCII 'C'
+        packet += b"C"
+
+        # Byte 12: ASCII 'N'
+        packet += b"N"
+
+        # Byte 13: always 0
+        packet += bytes([0x00])
+
+        # Byte 14: Ready -> 'R' or 0
+        packet += (b"R" if self.ready_var.get() else bytes([0x00]))
+
+        # Byte 15: Tar_Det -> 'D' or 0
+        packet += (b"D" if self.tar_det_var.get() else bytes([0x00]))
+
+        # Byte 16: Exp -> 'X' or 0
+        packet += (b"X" if self.exp_var.get() else bytes([0x00]))
+
+        # At this point packet length should be 2 + 3 + 11 = 16 bytes
+        # CRC computed over bytes 6..16 (1-based) -> zero-based slice [5:16]
+        # Our packet currently: indices 0..15 ; bytes 6..16 correspond to packet[5:16]
+        data_for_crc = bytes(packet[5:16])
+        crc = crc16_ccitt_false(data_for_crc)
+        # Append CRC as big-endian hi, lo
+        packet += crc.to_bytes(2, "big")
+
+        # Footer AA55
+        packet += bytes.fromhex("AA55")
+
+        return bytes(packet)
+
     def send_fi_key(self):
-        """Send the Fi packet (user-provided hex). Handles stray '0x' if present."""
+        """Build Fire packet from GUI fields and send it."""
         if not self.serial_port or not self.serial_port.is_open:
             messagebox.showwarning("Send", "Serial port is not open.")
             return
-        # original requested string: "FA704F460102030405060708090A0B0xCF5AAA55"
-        raw = "FA704F460102030405060708090A0B0xCF5AAA55"
-        # remove any '0x' or 'x' markers and keep only hex chars
-        cleaned = raw.replace("0x", "").replace("0X", "").replace("x", "").replace("X", "")
-        cleaned = "".join(ch for ch in cleaned if ch in "0123456789abcdefABCDEF")
         try:
-            data = bytes.fromhex(cleaned)
-        except Exception as e:
-            messagebox.showerror("Send", f"Invalid Fi hex payload after cleaning:\n{e}")
+            pkt = self._build_fi_packet()
+        except ValueError as e:
+            messagebox.showerror("Fire packet", f"Invalid Fire parameters:\n{e}")
             return
         try:
-            self.serial_port.write(data)
+            self.serial_port.write(pkt)
             ts = time.time()
-            self._display_sent(ts, data)
+            self._display_sent(ts, pkt)
         except Exception as e:
-            messagebox.showerror("Send", f"Failed to send FI key:\n{e}")
+            messagebox.showerror("Send", f"Failed to send Fire packet:\n{e}")
 
     def _display_sent(self, ts, data: bytes):
         if self.show_hex.get():
