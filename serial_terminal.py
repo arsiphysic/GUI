@@ -193,12 +193,12 @@ class SerialTerminal(tk.Tk):
 
         # action buttons (Full / Fi / self)
         btn_frame = ttk.Frame(actions_frame)
-        btn_frame.grid(row=2, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
         btn_frame.columnconfigure((0, 1, 2), weight=1)
 
         # Self
         right_col = ttk.Frame(btn_frame)
-        right_col.grid(row=2, column=0, sticky="we")
+        right_col.grid(row=1, column=0, sticky="we")
         self.self_btn = tk.Button(right_col, text="self", bg="#007bff", fg="white", activebackground="#0069d9",
                                   command=self._toggle_repeat_self)
         self.self_btn.pack(fill="x")
@@ -207,7 +207,7 @@ class SerialTerminal(tk.Tk):
 
         # Full
         left_col = ttk.Frame(btn_frame)
-        left_col.grid(row=2, column=1, sticky="we", padx=(0, 6))
+        left_col.grid(row=1, column=1, sticky="we", padx=(0, 6))
         self.full_btn = tk.Button(left_col, text="Full", bg="#28a745", fg="white", activebackground="#1e7e34",
                                   command=self._toggle_repeat_full)
         self.full_btn.pack(fill="x")
@@ -216,7 +216,7 @@ class SerialTerminal(tk.Tk):
 
         # Fi
         mid_col = ttk.Frame(btn_frame)
-        mid_col.grid(row=2, column=2, sticky="we", padx=(0, 6))
+        mid_col.grid(row=1, column=2, sticky="we", padx=(0, 6))
         self.fi_btn = tk.Button(mid_col, text="Fi", bg="#d9534f", fg="white", activebackground="#c43d3d",
                                 command=self._toggle_repeat_fi)
         self.fi_btn.pack(fill="x")
