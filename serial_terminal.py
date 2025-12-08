@@ -27,7 +27,7 @@ try:
 except Exception:
     serial = None  # handle later
 
-APP_TITLE = "Serial Terminal"
+APP_TITLE = "F4_180_S | Serial Terminal"
 DEFAULT_ENCODING = "utf-8"
 
 COMMON_BAUDRATES = [
