@@ -4,12 +4,12 @@ serial_terminal.py
 
 Serial port terminal GUI (Tkinter + pyserial)
 
-This version restores the full set of action buttons that were present in the earlier
-version (Full, Fi, self, Save Sent, Save Received, Clear All, Clear Received, Clear Sent,
+This version restores the Full_Self_Test set of action buttons that were present in the earlier
+version (Full_Self_Test, Fire, Self_Test, Save Sent, Save Received, Clear All, Clear Received, Clear Sent,
 Save Log (combined), Stop All, etc.). It also keeps:
 - vertical split view (Received | Sent)
 - Time Interval in milliseconds (live update)
-- repeat (Full/Fi/self) with indicators
+- repeat (Full_Self_Test/Fire/Self_Test) with indicators
 - input validation for Vc, H and Time Interval
 - Save/Clear helpers for each pane and combined save
 """
@@ -73,7 +73,7 @@ class SerialTerminal(tk.Tk):
         self.append_newline = tk.BooleanVar(value=False)
         self.send_as_hex = tk.BooleanVar(value=False)
 
-        # Fi controls
+        # Fire controls
         self.ready_var = tk.BooleanVar(value=False)
         self.tar_det_var = tk.BooleanVar(value=False)
         self.exp_var = tk.BooleanVar(value=False)
@@ -84,8 +84,8 @@ class SerialTerminal(tk.Tk):
         self.time_interval_var = tk.StringVar(value="0")
 
         # Repeat state
-        self._repeat_after_ids = {"full": None, "fi": None, "self": None}
-        self._repeat_running = {"full": False, "fi": False, "self": False}
+        self._repeat_after_ids = {"Full_Self_Test": None, "Fire": None, "Self_Test": None}
+        self._repeat_running = {"Full_Self_Test": False, "Fire": False, "Self_Test": False}
 
         # Build UI
         self._setup_style()
@@ -191,33 +191,33 @@ class SerialTerminal(tk.Tk):
         # ttk.Button(top_buttons, text="Save Log", command=self.save_log_all).grid(row=1, column=2, padx=(0, 6))
         ttk.Button(top_buttons, text="Stop All", command=self._stop_all).grid(row=1, column=3, padx=(6, 0))
 
-        # action buttons (Full / Fi / self)
+        # action buttons (Full_Self_Test / Fire / Self_Test)
         btn_frame = ttk.Frame(actions_frame)
         btn_frame.grid(row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
         btn_frame.columnconfigure((0, 1, 2), weight=1)
 
-        # Self
+        # Self_Test
         right_col = ttk.Frame(btn_frame)
         right_col.grid(row=1, column=0, sticky="we")
-        self.self_btn = tk.Button(right_col, text="self", bg="#007bff", fg="white", activebackground="#0069d9",
+        self.self_btn = tk.Button(right_col, text="Self_Test", bg="#007bff", fg="white", activebackground="#0069d9",
                                   command=self._toggle_repeat_self)
         self.self_btn.pack(fill="x")
         self.self_ind = tk.Label(right_col, text="OFF", bg="#cccccc", width=4)
         self.self_ind.pack(pady=(4, 0))
 
-        # Full
+        # Full_Self_Test
         left_col = ttk.Frame(btn_frame)
         left_col.grid(row=1, column=1, sticky="we", padx=(0, 6))
-        self.full_btn = tk.Button(left_col, text="Full", bg="#28a745", fg="white", activebackground="#1e7e34",
+        self.full_btn = tk.Button(left_col, text="Full_Self_Test", bg="#28a745", fg="white", activebackground="#1e7e34",
                                   command=self._toggle_repeat_full)
         self.full_btn.pack(fill="x")
         self.full_ind = tk.Label(left_col, text="OFF", bg="#cccccc", width=4)
         self.full_ind.pack(pady=(4, 0))
 
-        # Fi
+        # Fire
         mid_col = ttk.Frame(btn_frame)
         mid_col.grid(row=1, column=2, sticky="we", padx=(0, 6))
-        self.fi_btn = tk.Button(mid_col, text="Fi", bg="#d9534f", fg="white", activebackground="#c43d3d",
+        self.fi_btn = tk.Button(mid_col, text="Fire", bg="#d9534f", fg="white", activebackground="#c43d3d",
                                 command=self._toggle_repeat_fi)
         self.fi_btn.pack(fill="x")
         self.fi_ind = tk.Label(mid_col, text="OFF", bg="#cccccc", width=4)
@@ -225,8 +225,8 @@ class SerialTerminal(tk.Tk):
 
 
 
-        # Fi options
-        fi_frame = ttk.Labelframe(right_frame, text="Fi packet options", padding=(8, 8))
+        # Fire options
+        fi_frame = ttk.Labelframe(right_frame, text="Fire packet options", padding=(8, 8))
         fi_frame.pack(fill="x", pady=(6, 6))
 
         vcmd = (self.register(self._validate_uint16), "%P", "%W")
@@ -471,14 +471,14 @@ class SerialTerminal(tk.Tk):
         try:
             pkt = self._build_fi_packet()
         except ValueError as e:
-            messagebox.showerror("Fi packet", f"Invalid Fi parameters:\n{e}")
+            messagebox.showerror("Fire packet", f"Invalid Fire parameters:\n{e}")
             return
         try:
             self.serial_port.write(pkt)
             ts = time.time()
             self.log_sent(ts, pkt)
         except Exception as e:
-            messagebox.showerror("Send", f"Failed to send Fi packet:\n{e}")
+            messagebox.showerror("Send", f"Failed to send Fire packet:\n{e}")
 
     def send_full_key(self):
         if not self.serial_port or not getattr(self.serial_port, "is_open", False):
@@ -490,7 +490,7 @@ class SerialTerminal(tk.Tk):
             ts = time.time()
             self.log_sent(ts, data)
         except Exception as e:
-            messagebox.showerror("Send", f"Failed to send FULL key:\n{e}")
+            messagebox.showerror("Send", f"Failed to send Full_Self_Test key:\n{e}")
 
     def send_self_key(self):
         if not self.serial_port or not getattr(self.serial_port, "is_open", False):
@@ -502,7 +502,7 @@ class SerialTerminal(tk.Tk):
             ts = time.time()
             self.log_sent(ts, data)
         except Exception as e:
-            messagebox.showerror("Send", f"Failed to send SELF key:\n{e}")
+            messagebox.showerror("Send", f"Failed to send Self_Test key:\n{e}")
 
     def send_data(self):
         if not self.serial_port or not getattr(self.serial_port, "is_open", False):
@@ -657,38 +657,38 @@ class SerialTerminal(tk.Tk):
                 pass
         self._repeat_after_ids[name] = None
         self._repeat_running[name] = False
-        if name == "full":
+        if name == "Full_Self_Test":
             button_widget.config(relief="raised", bg="#28a745")
             indicator_label.config(text="OFF", bg="#cccccc")
-        elif name == "fi":
+        elif name == "Fire":
             button_widget.config(relief="raised", bg="#d9534f")
             indicator_label.config(text="OFF", bg="#cccccc")
-        elif name == "self":
+        elif name == "Self_Test":
             button_widget.config(relief="raised", bg="#007bff")
             indicator_label.config(text="OFF", bg="#cccccc")
 
     def _stop_all(self):
-        self._stop_repeat("full", self.full_btn, self.full_ind)
-        self._stop_repeat("fi", self.fi_btn, self.fi_ind)
-        self._stop_repeat("self", self.self_btn, self.self_ind)
+        self._stop_repeat("Full_Self_Test", self.full_btn, self.full_ind)
+        self._stop_repeat("Fire", self.fi_btn, self.fi_ind)
+        self._stop_repeat("Self_Test", self.self_btn, self.self_ind)
 
     def _toggle_repeat_full(self):
-        if self._repeat_running.get("full"):
-            self._stop_repeat("full", self.full_btn, self.full_ind)
+        if self._repeat_running.get("Full_Self_Test"):
+            self._stop_repeat("Full_Self_Test", self.full_btn, self.full_ind)
         else:
-            self._start_repeat("full", self.send_full_key, self.full_btn, self.full_ind)
+            self._start_repeat("Full_Self_Test", self.send_full_key, self.full_btn, self.full_ind)
 
     def _toggle_repeat_fi(self):
-        if self._repeat_running.get("fi"):
-            self._stop_repeat("fi", self.fi_btn, self.fi_ind)
+        if self._repeat_running.get("Fire"):
+            self._stop_repeat("Fire", self.fi_btn, self.fi_ind)
         else:
-            self._start_repeat("fi", self.send_fi_key, self.fi_btn, self.fi_ind)
+            self._start_repeat("Fire", self.send_fi_key, self.fi_btn, self.fi_ind)
 
     def _toggle_repeat_self(self):
-        if self._repeat_running.get("self"):
-            self._stop_repeat("self", self.self_btn, self.self_ind)
+        if self._repeat_running.get("Self_Test"):
+            self._stop_repeat("Self_Test", self.self_btn, self.self_ind)
         else:
-            self._start_repeat("self", self.send_self_key, self.self_btn, self.self_ind)
+            self._start_repeat("Self_Test", self.send_self_key, self.self_btn, self.self_ind)
 
     # Cleanup
     def on_close(self):
